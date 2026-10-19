@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import {
   fetchAnchors,
   registerAnchor,
@@ -8,10 +8,12 @@ import {
 } from "@/lib/anchorsApi";
 import { Anchor } from "@/lib/types";
 import { matchesQuery } from "@/lib/search";
+import { ApiRequestError } from "@/lib/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useToast } from "@/hooks/useToast";
 import { useFocusShortcut } from "@/hooks/useFocusShortcut";
 import { useQueryState } from "@/hooks/useQueryState";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { Card } from "./Card";
 import { TableSkeleton } from "./TableSkeleton";
 import { AnchorForm } from "./AnchorForm";
@@ -62,12 +64,12 @@ function filterAnchors(anchors: Anchor[], filter: StatusFilter): Anchor[] {
 export function AnchorsPanel() {
   const load = useCallback((signal: AbortSignal) => fetchAnchors(signal), []);
   const { state, reload } = useAsync(load);
-  const { notify } = useToast();
+  const { notify, notifyError } = useToast();
   const [pending, setPending] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [pendingDeregisterId, setPendingDeregisterId] = useState<
-    string | null
-  >(null);
+  const [pendingDeregisterId, setPendingDeregisterId] = useState<string | null>(
+    null,
+  );
   // Ids of anchors with a deactivation request currently in flight. This is
   // mirrored into a ref so the short-circuit guard below always reads the
   // latest value, independent of which render produced the deregister closure.
@@ -77,6 +79,30 @@ export function AnchorsPanel() {
   const deregisteringRef = useRef<Set<string>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
   useFocusShortcut("/", searchRef);
+
+  // One ref per filter button for imperative focus management (roving tabindex).
+  const filterRefs = useRef<Array<HTMLButtonElement | null>>(
+    Array(FILTERS.length).fill(null),
+  );
+
+  /** Arrow-key / Home / End roving focus across the filter button group. */
+  function onFilterKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
+    const last = FILTERS.length - 1;
+    let next: number | null = null;
+
+    if (event.key === "ArrowRight") next = index === last ? 0 : index + 1;
+    else if (event.key === "ArrowLeft") next = index === 0 ? last : index - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+
+    if (next !== null) {
+      event.preventDefault();
+      filterRefs.current[next]?.focus();
+    }
+  }
 
   // Sync status filter and search query to the URL querystring.
   // Initial values are hydrated from the URL on first render.
@@ -93,29 +119,37 @@ export function AnchorsPanel() {
 
   const [query, setQuery] = useQueryState("q", "");
 
-  // Sync sort column and direction to the URL querystring.
-  const [rawSort, setSortParam] = useQueryState("sort", "");
-  const [rawDir, setDirParam] = useQueryState("dir", "");
+  // Sort state also lives in the URL so a sorted view is shareable/bookmarkable.
+  const [sortParam, setSortParam] = useQueryState("sort", "");
+  const [dirParam, setDirParam] = useQueryState("dir", "");
+  const sortIsValid =
+    VALID_SORT_KEYS.has(sortParam) && VALID_SORT_DIRECTIONS.has(dirParam);
+  const initialSort: SortState<SortKey> | null = useMemo(
+    () =>
+      sortIsValid
+        ? { key: sortParam as SortKey, direction: dirParam as SortDirection }
+        : null,
+    // Only the first render's value is used to hydrate the table's sort state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
-  const isValidSortKey = (v: string): v is SortKey => VALID_SORT_KEYS.has(v);
-  const isValidDir = (v: string): v is SortDirection =>
-    VALID_SORT_DIRECTIONS.has(v);
-
-  const initialSort: SortState<SortKey> | null =
-    isValidSortKey(rawSort) && isValidDir(rawDir)
-      ? { key: rawSort, direction: rawDir }
-      : null;
-
-  // Correct invalid sort/dir params in the URL to the clean (unsorted) state.
+  // Drop unusable sort params from the URL so the address bar matches the view.
   useEffect(() => {
-    if (rawSort !== "" && !isValidSortKey(rawSort)) setSortParam("");
-    if (rawDir !== "" && !isValidDir(rawDir)) setDirParam("");
-  }, [rawSort, rawDir, setSortParam, setDirParam]);
+    if ((sortParam || dirParam) && !sortIsValid) {
+      setSortParam("");
+      setDirParam("");
+    }
+  }, [sortParam, dirParam, sortIsValid, setSortParam, setDirParam]);
+
+  // Debounce only the value that drives filtering so large anchor lists aren't
+  // re-filtered on every keystroke; the input stays bound to `query` above.
+  const debouncedQuery = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 
   const filteredAnchors =
     state.status === "ready"
       ? filterAnchors(state.data, filter).filter((anchor) =>
-          matchesQuery([anchor.id, anchor.name], query),
+          matchesQuery([anchor.id, anchor.name], debouncedQuery),
         )
       : [];
 
@@ -128,9 +162,15 @@ export function AnchorsPanel() {
       reload();
       return true;
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Registration failed";
-      notify("error", message);
-      setServerError(message);
+      const message = notifyError(err, "Registration failed.");
+      // Only surface id-specific failures (e.g. duplicate/conflict) inline on the
+      // AnchorForm id field. Generic failures (network, 5xx, etc.) stay as toasts.
+      if (
+        err instanceof ApiRequestError &&
+        (err.status === 409 || err.code === "CONFLICT")
+      ) {
+        setServerError(message ?? "Registration failed.");
+      }
       return false;
     } finally {
       setPending(false);
@@ -150,7 +190,7 @@ export function AnchorsPanel() {
       notify("success", `Deactivated anchor "${id}".`);
       reload();
     } catch (err: unknown) {
-      notify("error", err instanceof Error ? err.message : "Deactivation failed");
+      notifyError(err, "Deactivation failed.");
     } finally {
       deregisteringRef.current.delete(id);
       setDeregisteringIds((prev) => {
@@ -167,7 +207,11 @@ export function AnchorsPanel() {
         <h2 className="mb-3 text-sm font-semibold text-zinc-200">
           Register anchor
         </h2>
-        <AnchorForm onSubmit={register} pending={pending} serverError={serverError || undefined} />
+        <AnchorForm
+          onSubmit={register}
+          pending={pending}
+          serverError={serverError || undefined}
+        />
       </Card>
       <Card>
         {state.status === "loading" ? (
@@ -177,11 +221,19 @@ export function AnchorsPanel() {
         ) : (
           <>
             {state.data.length > 0 ? (
-              <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div
+                role="search"
+                aria-label="Anchors search and filters"
+                className="mb-3 flex flex-wrap items-center gap-2"
+              >
                 {FILTERS.map((f, i) => (
                   <button
                     key={f.value}
+                    ref={(el) => {
+                      filterRefs.current[i] = el;
+                    }}
                     onClick={() => setStatus(f.value)}
+                    onKeyDown={(e) => onFilterKeyDown(e, i)}
                     aria-pressed={filter === f.value}
                     tabIndex={filter === f.value ? 0 : -1}
                     className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${

@@ -8,12 +8,14 @@ import {
   cancelSettlement,
   exportSettlementsCsv,
 } from "@/lib/settlementsApi";
-import { Settlement, Pagination, Pool } from "@/lib/types";
+import { Settlement, Pagination } from "@/lib/types";
 import { fetchPools } from "@/lib/api";
+import { useAsync } from "@/hooks/useAsync";
 import { pluralize } from "@/lib/format";
 import { matchesQuery } from "@/lib/search";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useToast } from "@/hooks/useToast";
+import { apiErrorMessage } from "@/lib/toast";
 import { useFocusShortcut } from "@/hooks/useFocusShortcut";
 import { useQueryState } from "@/hooks/useQueryState";
 import { Card } from "./Card";
@@ -66,9 +68,8 @@ export function SettlementsPanel() {
   const [pendingSettlementIds, setPendingSettlementIds] = useState<Set<number>>(
     () => new Set(),
   );
-  const [pools, setPools] = useState<Pool[]>([]);
   const [exporting, setExporting] = useState(false);
-  const { notify } = useToast();
+  const { notify, notifyError } = useToast();
   const searchRef = useRef<HTMLInputElement>(null);
   useFocusShortcut("/", searchRef);
 
@@ -110,33 +111,25 @@ export function SettlementsPanel() {
       )
       .catch((err: unknown) => {
         if (controller.signal.aborted) return;
+        const message = apiErrorMessage(err);
+        if (message === null) return;
         setState({
           status: "error",
-          message: err instanceof Error ? err.message : "Request failed",
+          message,
         });
       });
     return () => controller.abort();
   }, [nonce, pageSize]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchPools(controller.signal)
-      .then(setPools)
-      .catch((err) => {
-        if (!controller.signal.aborted) {
-          console.error("Failed to load pools", err);
-        }
-      });
-    return () => controller.abort();
-  }, []);
+  const { state: poolsState, refresh: refreshPools } = useAsync(fetchPools);
 
   const availableLiquidity = useMemo(() => {
-    if (pools.length === 0) return undefined;
-    return pools.reduce((acc, pool) => {
+    if (poolsState.status !== "ready") return undefined;
+    return poolsState.data.reduce((acc, pool) => {
       acc[pool.asset] = pool.total;
       return acc;
     }, {} as Record<string, number>);
-  }, [pools]);
+  }, [poolsState]);
 
   /** Switches the page size and reloads from page 1. */
   function changePageSize(size: number) {
@@ -168,9 +161,7 @@ export function SettlementsPanel() {
         `Loaded ${pluralize(next.settlements.length, "more settlement")}`,
       );
     } catch (err: unknown) {
-      setMoreError(
-        err instanceof Error ? err.message : "Failed to load more settlements",
-      );
+      setMoreError(apiErrorMessage(err, "Failed to load more settlements."));
     } finally {
       setLoadingMore(false);
     }
@@ -179,9 +170,23 @@ export function SettlementsPanel() {
   async function runSettlementAction(
     id: number,
     action: () => Promise<Settlement>,
+    optimisticStatus: Settlement["status"],
     successMessage: string,
   ) {
     setPendingSettlementIds((prev) => new Set(prev).add(id));
+    
+    let previousSettlement: Settlement | undefined;
+    setState((previous) => {
+      if (previous.status !== "ready") return previous;
+      previousSettlement = previous.settlements.find((s) => s.id === id);
+      return {
+        ...previous,
+        settlements: previous.settlements.map((s) =>
+          s.id === id ? { ...s, status: optimisticStatus } : s
+        ),
+      };
+    });
+
     try {
       const updatedSettlement = await action();
       setState((previous) =>
@@ -197,8 +202,26 @@ export function SettlementsPanel() {
           : previous,
       );
       notify("success", successMessage);
+      // Silently refresh pools after execute and cancel.
+      // Cancel releases reserved liquidity; execute is refreshed defensively
+      // (believed to not change liquidity based on UI copy, not verified
+      // against backend behavior).
+      void refreshPools().catch(() => {});
     } catch (err: unknown) {
-      notify("error", err instanceof Error ? err.message : "Request failed");
+      if (previousSettlement) {
+        const rollbackSettlement = previousSettlement;
+        setState((previous) =>
+          previous.status === "ready"
+            ? {
+                ...previous,
+                settlements: previous.settlements.map((s) =>
+                  s.id === id ? rollbackSettlement : s
+                ),
+              }
+            : previous,
+        );
+      }
+      notifyError(err);
     } finally {
       setPendingSettlementIds((prev) => {
         const next = new Set(prev);
@@ -218,9 +241,12 @@ export function SettlementsPanel() {
       await openSettlement(input);
       notify("success", `Opened a settlement for ${input.amount} ${input.asset}.`);
       reload();
+      // Silently refresh pools in the background so availableLiquidity
+      // stays current after reserving liquidity.
+      void refreshPools().catch(() => {});
       return true;
     } catch (err: unknown) {
-      notify("error", err instanceof Error ? err.message : "Request failed");
+      notifyError(err);
       return false;
     } finally {
       setPending(false);
@@ -258,7 +284,7 @@ export function SettlementsPanel() {
       URL.revokeObjectURL(url);
       notify("success", "Exported settlements as CSV.");
     } catch (err: unknown) {
-      notify("error", err instanceof Error ? err.message : "Failed to export CSV");
+      notifyError(err, "Failed to export CSV.");
     } finally {
       setExporting(false);
     }
@@ -271,7 +297,7 @@ export function SettlementsPanel() {
   const visibleSettlements =
     state.status === "ready"
       ? state.settlements.filter((s) =>
-          matchesQuery([s.id, s.anchor, s.asset], debouncedQuery),
+          matchesQuery([s.id, s.anchor, s.asset, s.status], debouncedQuery),
         )
       : [];
 
@@ -352,6 +378,7 @@ export function SettlementsPanel() {
                   runSettlementAction(
                     id,
                     () => executeSettlement(id),
+                    "executed",
                     `Executed settlement #${id}.`,
                   )
                 }
@@ -394,6 +421,7 @@ export function SettlementsPanel() {
             runSettlementAction(
               id,
               () => cancelSettlement(id),
+              "cancelled",
               `Cancelled settlement #${id}.`,
             );
           }

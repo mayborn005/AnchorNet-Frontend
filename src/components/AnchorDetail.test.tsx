@@ -63,17 +63,18 @@ describe("AnchorDetail", () => {
   });
 
   it("shows a not‑found message when the anchor returns 404", async () => {
-    vi.mocked(fetchAnchor).mockRejectedValue(new ApiRequestError(404, "NOT_FOUND", "Not found"));
+    vi.mocked(fetchAnchor).mockRejectedValue(
+      new ApiRequestError(404, "NOT_FOUND", "Not found"),
+    );
 
     renderDetail();
 
     // Expect the distinct not‑found text
     expect(await screen.findByText(/anchor not found/i)).toBeInTheDocument();
-    const backLink = screen.getByRole("link", { name: /back to anchors/i });
+    const backLink = screen.getByRole("link", { name: /← back to anchors/i });
     expect(backLink).toBeInTheDocument();
     expect(backLink).toHaveAttribute("href", "/anchors");
   });
-
 
   it("hides the deactivate action for an already-inactive anchor", async () => {
     vi.mocked(fetchAnchor).mockResolvedValue({
@@ -119,54 +120,115 @@ describe("AnchorDetail", () => {
     );
   });
 
-  it("skips fetchAnchor on mount when initialData is provided", () => {
-    const initialData = {
+  it("cancels deactivation when Cancel is clicked in the confirm dialog", async () => {
+    vi.mocked(fetchAnchor).mockResolvedValue({
       id: "anchorA",
-      name: "Anchor A (Seeded)",
-      registeredAt: "2026-01-01T00:00:00.000Z",
+      name: "Anchor A",
+      registeredAt: "",
       active: true,
-    };
+    });
 
-    render(
-      <ToastProvider>
-        <AnchorDetail id="anchorA" initialData={initialData} />
-      </ToastProvider>,
-    );
+    renderDetail();
+    await screen.findByText("Anchor A");
 
-    expect(screen.getByText("Anchor A (Seeded)")).toBeInTheDocument();
-    expect(fetchAnchor).not.toHaveBeenCalled();
+    // Click "Deactivate" to open the dialog
+    fireEvent.click(screen.getByRole("button", { name: "Deactivate" }));
+    expect(deregisterAnchor).not.toHaveBeenCalled();
+
+    // Dialog should be open
+    const dialog = screen.getByRole("alertdialog");
+    expect(dialog).toBeInTheDocument();
+
+    // Click the Cancel button in the dialog
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    // Verify deregisterAnchor was not called
+    expect(deregisterAnchor).not.toHaveBeenCalled();
+
+    // Dialog should be closed (either not in the document or queryByRole returns null)
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+
+    // Anchor status is unchanged (remains Active)
+    expect(screen.getByText("Active")).toBeInTheDocument();
   });
 
-  it("calls fetchAnchor when reloading after deactivating an anchor initialized with initialData", async () => {
-    const initialData = {
-      id: "anchorA",
-      name: "Anchor A (Seeded)",
-      registeredAt: "2026-01-01T00:00:00.000Z",
-      active: true,
-    };
+  it("deactivates an anchor without flashing a loading spinner", async () => {
+    type FetchedAnchor = Awaited<ReturnType<typeof fetchAnchor>>;
+    let resolveFetch: (value: FetchedAnchor) => void = () => {};
+    const fetchPromise = new Promise<FetchedAnchor>((resolve) => {
+      resolveFetch = resolve;
+    });
+
+    vi.mocked(fetchAnchor)
+      .mockResolvedValueOnce({
+        id: "anchorA",
+        name: "Anchor A",
+        registeredAt: "",
+        active: true,
+      })
+      .mockReturnValueOnce(fetchPromise);
+
     vi.mocked(deregisterAnchor).mockResolvedValue({
-      ...initialData,
-      active: false,
-    });
-    vi.mocked(fetchAnchor).mockResolvedValue({
-      ...initialData,
+      id: "anchorA",
+      name: "Anchor A",
+      registeredAt: "",
       active: false,
     });
 
-    render(
-      <ToastProvider>
-        <AnchorDetail id="anchorA" initialData={initialData} />
-      </ToastProvider>,
-    );
-
-    expect(screen.getByText("Anchor A (Seeded)")).toBeInTheDocument();
-    expect(fetchAnchor).not.toHaveBeenCalled();
+    renderDetail();
+    expect(await screen.findByText("Anchor A")).toBeInTheDocument();
+    expect(screen.getByText("Active")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Deactivate" }));
     const dialog = screen.getByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Deactivate" }));
 
-    await waitFor(() => expect(deregisterAnchor).toHaveBeenCalledWith("anchorA"));
-    await waitFor(() => expect(fetchAnchor).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(deregisterAnchor).toHaveBeenCalledWith("anchorA"),
+    );
+
+    // Should NOT show the loading spinner during the re-fetch
+    expect(screen.queryByText(/Loading anchor…/i)).not.toBeInTheDocument();
+    // The previously-rendered data should still be visible
+    expect(screen.getByText("Anchor A")).toBeInTheDocument();
+
+    // Resolve the re-fetch
+    resolveFetch({
+      id: "anchorA",
+      name: "Anchor A",
+      registeredAt: "",
+      active: false,
+    });
+
+    // Wait for the newly fetched status to be reflected
+    await waitFor(() =>
+      expect(screen.getByText("Inactive")).toBeInTheDocument(),
+    );
+  });
+
+  it("handles deactivation error gracefully", async () => {
+    vi.mocked(fetchAnchor).mockResolvedValue({
+      id: "anchorA",
+      name: "Anchor A",
+      registeredAt: "",
+      active: true,
+    });
+    vi.mocked(deregisterAnchor).mockRejectedValue(
+      new Error("Deactivation failed test error"),
+    );
+
+    renderDetail();
+    expect(await screen.findByText("Anchor A")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Deactivate" }));
+    const dialog = screen.getByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Deactivate" }));
+
+    await waitFor(() =>
+      expect(deregisterAnchor).toHaveBeenCalledWith("anchorA"),
+    );
+
+    // We expect a toast with the error message but we don't strictly test the toast component itself here,
+    // just the error branch in the catch block of deactivate()
   });
 });

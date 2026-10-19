@@ -4,6 +4,7 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { ToastProvider } from "./ToastProvider";
 import { useToast } from "@/hooks/useToast";
 import { MAX_TOASTS, type Toast } from "@/lib/toast";
+import { ApiRequestError } from "@/lib/api";
 
 /** Fires a single notification on mount via the real toast context. */
 function Trigger({
@@ -30,6 +31,14 @@ function BurstTrigger({ count }: { count: number }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  return null;
+}
+
+function ErrorTrigger({ error }: { error: unknown }) {
+  const { notifyError } = useToast();
+  useEffect(() => {
+    notifyError(error);
+  }, [error, notifyError]);
   return null;
 }
 
@@ -81,6 +90,48 @@ describe("ToastProvider", () => {
     expect(screen.getByText("Saved successfully")).toBeInTheDocument();
   });
 
+  it("does not surface or report a deliberately aborted request", () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    render(
+      <ToastProvider>
+        <ErrorTrigger error={new DOMException("aborted", "AbortError")} />
+      </ToastProvider>,
+    );
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("reports a classified failure and renders its user-facing message", () => {
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const error = new ApiRequestError(
+      undefined,
+      "TIMEOUT",
+      "internal timeout detail",
+      undefined,
+      { kind: "timeout", attempts: 3 },
+    );
+
+    render(
+      <ToastProvider>
+        <ErrorTrigger error={error} />
+      </ToastProvider>,
+    );
+
+    expect(screen.getByText("The request timed out. Try again.")).toBeInTheDocument();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("kind=timeout"),
+      error,
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
   it("dismisses a toast when its close button is clicked", () => {
     render(
       <ToastProvider>
@@ -114,7 +165,9 @@ describe("ToastProvider", () => {
     expect(screen.queryByText("Message 1")).not.toBeInTheDocument();
     expect(screen.queryByText("Message 2")).not.toBeInTheDocument();
     expect(screen.getByText("Message 3")).toBeInTheDocument();
-    expect(screen.getByText(`+${MAX_TOASTS + 2 - MAX_TOASTS} more`)).toBeInTheDocument();
+    expect(
+      screen.getByText(`+${MAX_TOASTS + 2 - MAX_TOASTS} more`),
+    ).toBeInTheDocument();
   });
 
   it("does not show a dropped indicator when the burst stays within the cap", () => {
@@ -258,6 +311,39 @@ describe("ToastProvider", () => {
     expect(toast).not.toBeInTheDocument();
   });
 
+  it("dismisses a toast with Escape key when focused", () => {
+    render(
+      <ToastProvider>
+        <Trigger message="Escape me" />
+      </ToastProvider>,
+    );
+    const toast = screen.getByText("Escape me");
+    const region = screen.getByRole("status");
+
+    // Focus the toast region
+    fireEvent.focus(region);
+    // Press Escape
+    fireEvent.keyDown(region, { key: "Escape" });
+    expect(screen.queryByText("Escape me")).not.toBeInTheDocument();
+  });
+
+  it("Escape dismisses only the focused toast in a stack", () => {
+    render(
+      <ToastProvider>
+        <Trigger message="First toast" />
+        <Trigger message="Second toast" />
+      </ToastProvider>,
+    );
+    const firstToast = screen.getByText("First toast");
+    const secondToast = screen.getByText("Second toast");
+    const regions = screen.getAllByRole("status");
+    // Focus the first toast region
+    fireEvent.focus(regions[0]);
+    fireEvent.keyDown(regions[0], { key: "Escape" });
+    expect(screen.queryByText("First toast")).not.toBeInTheDocument();
+    expect(screen.getByText("Second toast")).toBeInTheDocument();
+  });
+
   it("treats a second pause while already paused as a no-op (no double counting)", () => {
     render(
       <ToastProvider>
@@ -289,8 +375,12 @@ describe("ToastProvider", () => {
   });
 
   it("does not throw or warn when notify or dismiss is called after provider unmounts", () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let capturedNotify: ((kind: Toast["kind"], message: string) => void) | undefined;
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    let capturedNotify:
+      | ((kind: Toast["kind"], message: string) => void)
+      | undefined;
     let capturedDismiss: ((id: number) => void) | undefined;
 
     function CaptureToast() {
@@ -342,10 +432,14 @@ describe("ToastProvider", () => {
 
     expect(screen.getByText("+2 more")).toBeInTheDocument();
   });
-});
+
   it("does not throw or warn when notify is called after provider unmounts", () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let capturedNotify: ((kind: Toast["kind"], message: string) => void) | undefined;
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    let capturedNotify:
+      | ((kind: Toast["kind"], message: string) => void)
+      | undefined;
 
     function CaptureNotify() {
       const { notify } = useToast();
@@ -360,64 +454,10 @@ describe("ToastProvider", () => {
         <CaptureNotify />
       </ToastProvider>,
     );
-    // Unmount the provider while keeping reference to notify.
+    // Unmount the provider while keeping a reference to notify.
     unmount();
 
-    // Call notify after unmount; should be safe no-op.
-    capturedNotify?.("success", "post-unmount");
-
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-    consoleErrorSpy.mockRestore();
-  });
-});
-  it("does not throw or warn when notify is called after provider unmounts", () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let capturedNotify: ((kind: Toast["kind"], message: string) => void) | undefined;
-
-    function CaptureNotify() {
-      const { notify } = useToast();
-      useEffect(() => {
-        capturedNotify = notify;
-      }, [notify]);
-      return null;
-    }
-
-    const { unmount } = render(
-      <ToastProvider>
-        <CaptureNotify />
-      </ToastProvider>,
-    );
-    // Unmount the provider while keeping reference to notify.
-    unmount();
-
-    // Call notify after unmount; should be safe no-op.
-    capturedNotify?.("success", "post-unmount");
-
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-    consoleErrorSpy.mockRestore();
-  });
-});
-  it("does not throw or warn when notify is called after provider unmounts", () => {
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let capturedNotify: ((kind: Toast["kind"], message: string) => void) | undefined;
-
-    function CaptureNotify() {
-      const { notify } = useToast();
-      useEffect(() => {
-        capturedNotify = notify;
-      }, [notify]);
-      return null;
-    }
-
-    const { unmount } = render(
-      <ToastProvider>
-        <CaptureNotify />
-      </ToastProvider>,
-    );
-    // Unmount the provider while keeping reference to notify.
-    unmount();
-
-    // Call notify after unmount; should be safe no-op.
+    // Call notify after unmount; should be a safe no-op.
     capturedNotify?.("success", "post-unmount");
 
     expect(consoleErrorSpy).not.toHaveBeenCalled();
