@@ -64,7 +64,7 @@ function filterAnchors(anchors: Anchor[], filter: StatusFilter): Anchor[] {
 export function AnchorsPanel() {
   const load = useCallback((signal: AbortSignal) => fetchAnchors(signal), []);
   const { state, reload } = useAsync(load);
-  const { notify } = useToast();
+  const { notify, notifyError } = useToast();
   const [pending, setPending] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [pendingDeregisterId, setPendingDeregisterId] = useState<string | null>(
@@ -108,15 +108,6 @@ export function AnchorsPanel() {
   // Initial values are hydrated from the URL on first render.
   const [rawStatus, setStatus] = useQueryState("status", "all");
   const filter: StatusFilter = isStatusFilter(rawStatus) ? rawStatus : "all";
-
-  const [sortParam, setSortParam] = useQueryState("sort", "");
-  const [dirParam, setDirParam] = useQueryState("dir", "");
-
-  const initialSort = useMemo<SortState<SortKey> | null>(() => {
-    if (!sortParam || !VALID_SORT_KEYS.has(sortParam)) return null;
-    const direction: SortDirection = dirParam === "desc" ? "desc" : "asc";
-    return { key: sortParam as SortKey, direction };
-  }, [sortParam, dirParam]);
 
   // When the URL carries an invalid status value, correct it to the effective
   // fallback ("all") so the address bar always reflects what is displayed.
@@ -171,16 +162,14 @@ export function AnchorsPanel() {
       reload();
       return true;
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "Registration failed";
-      notify("error", message);
+      const message = notifyError(err, "Registration failed.");
       // Only surface id-specific failures (e.g. duplicate/conflict) inline on the
       // AnchorForm id field. Generic failures (network, 5xx, etc.) stay as toasts.
       if (
         err instanceof ApiRequestError &&
         (err.status === 409 || err.code === "CONFLICT")
       ) {
-        setServerError(message);
+        setServerError(message ?? "Registration failed.");
       }
       return false;
     } finally {
@@ -201,10 +190,7 @@ export function AnchorsPanel() {
       notify("success", `Deactivated anchor "${id}".`);
       reload();
     } catch (err: unknown) {
-      notify(
-        "error",
-        err instanceof Error ? err.message : "Deactivation failed",
-      );
+      notifyError(err, "Deactivation failed.");
     } finally {
       deregisteringRef.current.delete(id);
       setDeregisteringIds((prev) => {

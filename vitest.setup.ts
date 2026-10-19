@@ -1,6 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { afterEach, vi } from "vitest";
+import { afterEach, vi, expect } from "vitest";
 import { cleanup } from "@testing-library/react";
+import { toHaveNoViolations } from "jest-axe";
+
+expect.extend(toHaveNoViolations);
 
 // Suppress the NEXT_PUBLIC_API_URL missing warning that fires as a module
 // side-effect when api.ts is imported in tests.
@@ -39,7 +42,6 @@ afterEach(() => {
 // browser API sufficiently for the wallet utilities and related tests.
 if (typeof window !== "undefined" && !window.localStorage) {
   const store = new Map<string, string>();
-  // @ts-ignore – extending the global window object for test purposes
   window.localStorage = {
     getItem(key: string) {
       return store.has(key) ? store.get(key)! : null;
