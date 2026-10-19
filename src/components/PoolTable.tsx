@@ -15,7 +15,7 @@ function getSortValue(pool: Pool, key: SortKey): string | number {
 
 /** Renders aggregated liquidity pools as a sortable table. */
 export function PoolTable({ pools }: { pools: Pool[] }) {
-  const { sorted, sort, requestSort } = useSortableData<Pool, SortKey>(
+  const { sorted, sort, requestSort, clearSort } = useSortableData<Pool, SortKey>(
     pools,
     getSortValue,
   );
@@ -44,18 +44,21 @@ export function PoolTable({ pools }: { pools: Pool[] }) {
             sortKey="asset"
             sort={sort}
             onSort={requestSort}
+            onClearSort={clearSort}
           />
           <SortableHeader
             label="Total liquidity"
             sortKey="total"
             sort={sort}
             onSort={requestSort}
+            onClearSort={clearSort}
           />
           <SortableHeader
             label="Anchors"
             sortKey="anchors"
             sort={sort}
             onSort={requestSort}
+            onClearSort={clearSort}
           />
         </tr>
       </thead>
@@ -72,7 +75,7 @@ export function PoolTable({ pools }: { pools: Pool[] }) {
       </tbody>
       <tfoot>
         <tr className="border-t border-zinc-700">
-          <td className="py-2 text-zinc-400 font-medium">Total</td>
+          <td className="py-2 text-zinc-400 font-medium">Total (visible rows)</td>
           <td className="py-2 text-zinc-200 font-medium">
             {formatAmount(pools.reduce((sum, p) => sum + p.total, 0))}
           </td>

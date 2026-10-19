@@ -69,7 +69,7 @@ describe("SettlementTable sorting", () => {
 
     const totalRow = document.querySelector("tfoot tr");
     expect(totalRow).not.toBeNull();
-    expect(within(totalRow!).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+    expect(within(totalRow as HTMLElement).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
       "Total (visible rows)",
       "600",
       "6",
@@ -86,6 +86,19 @@ describe("SettlementTable sorting", () => {
     render(<SettlementTable settlements={settlements} />);
     fireEvent.click(screen.getByLabelText("Sort by Amount"));
     expect(amountCells()).toEqual(["100", "200", "300"]);
+  });
+
+  it("resets an active sort directly to the original row order", () => {
+    render(<SettlementTable settlements={settlements} />);
+    const header = screen.getByLabelText("Sort by Amount").closest("th");
+
+    expect(screen.queryByRole("button", { name: "Reset sort" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Sort by Amount"));
+    expect(amountCells()).toEqual(["100", "200", "300"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset sort" }));
+    expect(amountCells()).toEqual(["300", "100", "200"]);
+    expect(header).toHaveAttribute("aria-sort", "none");
   });
 
   it("sorts descending by amount on a second click", () => {
@@ -248,15 +261,13 @@ describe("SettlementTable mobile layout", () => {
     render(<SettlementTable settlements={settlements} />);
     const cards = screen.getAllByTestId("settlement-card");
     expect(cards).toHaveLength(settlements.length);
-    settlements.forEach((s) => {
-      const card = screen
-        .getByText(`Settlement #${s.id}`)
-        .closest('[data-testid="settlement-card"]');
+    settlements.forEach((s, index) => {
+      const card = cards[index];
       expect(card).toBeInTheDocument();
-      expect(within(card!).getByText(s.anchor)).toBeInTheDocument();
-      expect(within(card!).getByText(s.asset)).toBeInTheDocument();
-      expect(within(card!).getByText(formatAmount(s.amount))).toBeInTheDocument();
-      expect(within(card!).getByText(formatAmount(s.fee))).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText(s.anchor)).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText(s.asset)).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText(formatAmount(s.amount))).toBeInTheDocument();
+      expect(within(card as HTMLElement).getByText(formatAmount(s.fee))).toBeInTheDocument();
     });
   });
 });
