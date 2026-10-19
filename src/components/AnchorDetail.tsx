@@ -25,11 +25,11 @@ export function AnchorDetail({
     (signal: AbortSignal) => fetchAnchor(id, signal),
     [id],
   );
-  const { state, reload } = useAsync(
+  const { state, refresh } = useAsync(
     load,
     initialData ? { status: "ready", data: initialData } : undefined,
   );
-  const { notify } = useToast();
+  const { notify, notifyError } = useToast();
   const [pending, setPending] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -38,9 +38,10 @@ export function AnchorDetail({
     try {
       await deregisterAnchor(id);
       notify("success", `Deactivated anchor "${id}".`);
-      reload();
+      // Use refresh() instead of reload() for a silent re-fetch without the loading spinner
+      await refresh();
     } catch (err: unknown) {
-      notify("error", err instanceof Error ? err.message : "Deactivation failed");
+      notifyError(err, "Deactivation failed.");
     } finally {
       setPending(false);
     }
